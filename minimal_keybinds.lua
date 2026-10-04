@@ -193,25 +193,6 @@ local function io_file_exists(path)
     return io_read_all(path) ~= nil
 end
 
-local function list_subdirs_windows(base)
-    if not io or not io.popen or not base or base == "" then return {} end
-    local cmd = 'cmd /c dir /b /ad "' .. base:gsub("/", "\\") .. '" 2>nul'
-    local pipe = io.popen(cmd)
-    if not pipe then return {} end
-
-    local result = pipe:read("*a") or ""
-    pipe:close()
-
-    local out = {}
-    for _, line in ipairs(split_lines(result)) do
-        line = line:gsub("^%s+", ""):gsub("%s+$", "")
-        if line ~= "" and line ~= "." and line ~= ".." then
-            out[#out + 1] = line
-        end
-    end
-    return out
-end
-
 local function maybe_add(tbl, value)
     if not value or value == "" then return end
     for i = 1, #tbl do
@@ -222,6 +203,68 @@ local function maybe_add(tbl, value)
     tbl[#tbl + 1] = value
 end
 
+local parse_keyvalues
+
+local function candidate_steam_roots()
+    local roots = {}
+    local pf86 = os and os.getenv and os.getenv("ProgramFiles(x86)") or nil
+    local pf = os and os.getenv and os.getenv("ProgramFiles") or nil
+    local home_drive = os and os.getenv and os.getenv("SystemDrive") or 'C:'
+    local steam_path = os and os.getenv and (os.getenv("SteamPath") or os.getenv("SteamDir")) or nil
+
+    maybe_add(roots, normalize_path(steam_path or ""))
+    maybe_add(roots, normalize_path((pf86 or "") .. "/Steam"))
+    maybe_add(roots, normalize_path((pf or "") .. "/Steam"))
+    maybe_add(roots, normalize_path((home_drive or 'C:') .. "/Steam"))
+    maybe_add(roots, "C:/Program Files (x86)/Steam")
+    maybe_add(roots, "C:/Program Files/Steam")
+    maybe_add(roots, "C:/Steam")
+    maybe_add(roots, "D:/Steam")
+    maybe_add(roots, "E:/Steam")
+    maybe_add(roots, "F:/Steam")
+    maybe_add(roots, "G:/Steam")
+
+    return roots
+end
+
+local function collect_steam_ids(node, primary, secondary)
+    if type(node) ~= "table" then return end
+
+    for k, v in pairs(node) do
+        if type(v) == "table" then
+            if type(k) == "string" and k:match("^%d+$") then
+                local most_recent = tostring(v.MostRecent or v.mostrecent or "")
+                if most_recent == "1" or most_recent:lower() == "true" then
+                    maybe_add(primary, k)
+                else
+                    maybe_add(secondary, k)
+                end
+            end
+            collect_steam_ids(v, primary, secondary)
+        end
+    end
+end
+
+local function add_loginusers_bind_paths(paths, steam_root)
+    local loginusers_path = normalize_path(steam_root .. "/config/loginusers.vdf")
+    local raw = io_read_all(loginusers_path)
+    if not raw then return end
+
+    local parsed = parse_keyvalues(raw)
+    if type(parsed) ~= "table" then return end
+
+    local preferred = {}
+    local fallback = {}
+    collect_steam_ids(parsed, preferred, fallback)
+
+    for i = 1, #preferred do
+        maybe_add(paths, normalize_path(steam_root .. "/userdata/" .. preferred[i] .. "/1422450/remote/cfg/citadelkeys_personal.lst"))
+    end
+    for i = 1, #fallback do
+        maybe_add(paths, normalize_path(steam_root .. "/userdata/" .. fallback[i] .. "/1422450/remote/cfg/citadelkeys_personal.lst"))
+    end
+end
+
 local function candidate_bind_paths()
     local paths = {}
     local custom = normalize_path(bind_path:get_string() or "")
@@ -230,29 +273,10 @@ local function candidate_bind_paths()
     end
 
     if auto_detect:get_bool() then
-        local steam_roots = {}
-        local pf86 = os and os.getenv and os.getenv("ProgramFiles(x86)") or nil
-        local pf = os and os.getenv and os.getenv("ProgramFiles") or nil
-        local home_drive = os and os.getenv and os.getenv("SystemDrive") or "C:"
-
-        maybe_add(steam_roots, normalize_path((pf86 or "") .. "/Steam"))
-        maybe_add(steam_roots, normalize_path((pf or "") .. "/Steam"))
-        maybe_add(steam_roots, normalize_path((home_drive or "C:") .. "/Steam"))
-        maybe_add(steam_roots, "C:/Program Files (x86)/Steam")
-        maybe_add(steam_roots, "C:/Program Files/Steam")
-        maybe_add(steam_roots, "C:/Steam")
-        maybe_add(steam_roots, "D:/Steam")
-        maybe_add(steam_roots, "E:/Steam")
-        maybe_add(steam_roots, "F:/Steam")
-        maybe_add(steam_roots, "G:/Steam")
-
+        local steam_roots = candidate_steam_roots()
         for i = 1, #steam_roots do
             local root = steam_roots[i]
-            local userdata = root .. "/userdata"
-            for _, steamid in ipairs(list_subdirs_windows(userdata)) do
-                maybe_add(paths, userdata .. "/" .. steamid .. "/1422450/remote/cfg/citadelkeys_personal.lst")
-            end
-
+            add_loginusers_bind_paths(paths, root)
             maybe_add(paths, root .. "/steamapps/common/Deadlock/game/citadel/cfg/user_keys_0_slot0.vcfg")
             maybe_add(paths, root .. "/steamapps/common/Project8/game/citadel/cfg/user_keys_0_slot0.vcfg")
             maybe_add(paths, root .. "/steamapps/common/Project8Staging/game/citadel/cfg/user_keys_0_slot0.vcfg")
@@ -332,7 +356,7 @@ local function parse_keyvalues_object(tokens, index)
     return obj, i
 end
 
-local function parse_keyvalues(text)
+parse_keyvalues = function(text)
     local tokens = tokenize_keyvalues(text or "")
     local root, _ = parse_keyvalues_object(tokens, 1)
     return root
@@ -694,10 +718,6 @@ callbacks.on_render(function()
     local screen = Engine.GetScreenSize()
     local x = clamp(pos_x:get_int(), 0, math.max(0, math.floor(screen.w - panel_w)))
     local y = clamp(pos_y:get_int(), 0, math.max(0, math.floor(screen.h - panel_h)))
-
-    render.filled_rect(x + 2.0 * sc, y + 4.0 * sc, panel_w, panel_h, 0.0, 0.0, 0.0, 0.16, 12.0 * sc)
-    render.filled_rect(x, y, panel_w, panel_h, 0.035, 0.040, 0.050, 0.62, 12.0 * sc)
-    render.rect(x, y, panel_w, panel_h, 1.0, 1.0, 1.0, 0.05, 1.0, 12.0 * sc)
 
     render.text(x + pad, y + pad - 1.0 * sc, 1.0, 1.0, 1.0, 0.34, "keybinds", 12.0 * sc)
 

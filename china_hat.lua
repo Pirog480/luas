@@ -1,7 +1,7 @@
 -- local_china_hat.lua
 -- VITTLOCK Lua API
 -- Draws a gradient china hat above the local player with size/position controls.
--- Improved to use a stable origin-based anchor so the hat does not jitter from head-bone animations while moving.
+-- Improved to use a stable torso-based anchor with cached vertical lift so the hat stays locked to the hero without head-bone jitter or origin lag.
 
 local m = ui.script()
 m:category("Visuals")
@@ -34,7 +34,7 @@ local outline_thick  = m:slider_float("Outline thickness", 0.5, 3.0, 1.0)
 
 local TAU = math.pi * 2.0
 local cached_local_handle = -1
-local cached_head_height = 62.0
+local cached_head_height = 30.0
 
 local function lerp(a, b, t)
     return a + (b - a) * t
@@ -48,16 +48,27 @@ local function mix_color(c1, c2, t, alpha_mul)
         lerp(c1[4], c2[4], t) * alpha_mul
 end
 
-local function refresh_cached_head_height(handle, origin)
+local function refresh_cached_head_height(handle)
     if handle == cached_local_handle then
         return cached_head_height
     end
 
     cached_local_handle = handle
-    cached_head_height = 62.0
+    cached_head_height = 30.0
 
+    local torso = Engine.GetBonePosition(handle, "Torso")
     local head = Engine.GetBonePosition(handle, "Head")
-    if head then
+
+    if torso and head then
+        local dz = head.z - torso.z
+        if dz and dz > 1.0 and dz < 120.0 then
+            cached_head_height = dz
+            return cached_head_height
+        end
+    end
+
+    local origin = Engine.GetEntityOrigin(handle)
+    if head and origin then
         local dz = head.z - origin.z
         if dz and dz > 1.0 and dz < 200.0 then
             cached_head_height = dz
@@ -68,10 +79,16 @@ local function refresh_cached_head_height(handle, origin)
 end
 
 local function get_hat_center(handle)
-    local origin = Engine.GetEntityOrigin(handle)
-    local head_height = refresh_cached_head_height(handle, origin)
+    local torso = Engine.GetBonePosition(handle, "Torso")
+    local anchor = torso
 
-    return origin + Vector3.new(
+    if not anchor or (anchor.x == 0.0 and anchor.y == 0.0 and anchor.z == 0.0) then
+        anchor = Engine.GetEntityOrigin(handle)
+    end
+
+    local head_height = refresh_cached_head_height(handle)
+
+    return anchor + Vector3.new(
         offset_x:get_float(),
         offset_y:get_float(),
         head_height + offset_z:get_float()
