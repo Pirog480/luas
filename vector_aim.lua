@@ -33,6 +33,7 @@ local debug_text      = m:switch("Debug text", false)
 local locked_handle = -1
 local last_scan_count = 0
 local last_visible_count = 0
+local last_aim_applied = false
 
 local function clamp(v, a, b)
     if v < a then return a end
@@ -56,6 +57,10 @@ local function angle_delta(current, target)
     local dx = normalize_pitch(target.x - current.x)
     local dy = normalize_yaw(target.y - current.y)
     return dx, dy
+end
+
+local function angle_is_zero(a)
+    return a and a.x == 0.0 and a.y == 0.0 and a.z == 0.0
 end
 
 local function angle_len(dx, dy)
@@ -229,6 +234,8 @@ callbacks.on_local_death(function()
 end)
 
 callbacks.on_pre_createmove(function(cmd)
+    last_aim_applied = false
+
     if not should_run() then
         locked_handle = -1
         return
@@ -240,9 +247,13 @@ callbacks.on_pre_createmove(function(cmd)
 
     local local_team = Engine.GetEntityTeam(local_handle)
     local eye = get_eye_pos(local_handle)
-    local current = cmd:GetViewAngles()
-    if not current then
-        current = cmd:GetCameraAngles()
+
+    local current = cmd:GetCameraAngles()
+    if not current or angle_is_zero(current) then
+        current = cmd:GetViewAngles()
+    end
+    if not current or angle_is_zero(current) then
+        current = Engine.GetCameraAngles()
     end
     if not current then return end
 
@@ -273,6 +284,7 @@ callbacks.on_pre_createmove(function(cmd)
     )
 
     cmd:SetViewAngles(out)
+    last_aim_applied = true
 end)
 
 callbacks.on_render(function()
@@ -300,6 +312,6 @@ callbacks.on_render(function()
 
     if debug_text:get_bool() then
         render.text(20, 330, 1.0, 1.0, 1.0, 0.85,
-            string.format("aim scan=%d visible=%d locked=%d", last_scan_count, last_visible_count, locked_handle), 14)
+            string.format("aim scan=%d visible=%d locked=%d applied=%s", last_scan_count, last_visible_count, locked_handle, tostring(last_aim_applied)), 14)
     end
 end)
