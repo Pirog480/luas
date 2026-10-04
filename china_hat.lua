@@ -78,14 +78,17 @@ local function refresh_cached_head_height(handle)
     return cached_head_height
 end
 
-local function get_hat_center(handle)
+local function get_hat_anchor(handle)
     local torso = Engine.GetBonePosition(handle, "Torso")
-    local anchor = torso
-
-    if not anchor or (anchor.x == 0.0 and anchor.y == 0.0 and anchor.z == 0.0) then
-        anchor = Engine.GetEntityOrigin(handle)
+    if torso and not (torso.x == 0.0 and torso.y == 0.0 and torso.z == 0.0) then
+        return torso
     end
 
+    return Engine.GetEntityOrigin(handle)
+end
+
+local function get_hat_center_world(handle)
+    local anchor = get_hat_anchor(handle)
     local head_height = refresh_cached_head_height(handle)
 
     return anchor + Vector3.new(
@@ -110,7 +113,7 @@ callbacks.on_render(function()
     if not local_handle or local_handle < 0 then return end
     if not Engine.IsEntityAlive(local_handle) then return end
 
-    local center = get_hat_center(local_handle)
+    local center_world = get_hat_center_world(local_handle)
     local cone_height = height:get_float()
     local brim_radius = radius:get_float()
     local detail = segments:get_int()
@@ -121,12 +124,34 @@ callbacks.on_render(function()
 
     if detail < 3 then detail = 3 end
 
-    local apex = center + Vector3.new(0.0, 0.0, cone_height)
-    local apex_screen = Engine.WorldToScreen(apex)
-    local center_screen = Engine.WorldToScreen(center)
+    local center_screen = Engine.WorldToScreen(center_world)
+    if not center_screen.visible then return end
+
+    local apex_world = center_world + Vector3.new(0.0, 0.0, cone_height)
+    local apex_screen = Engine.WorldToScreen(apex_world)
     if not apex_screen.visible then return end
 
-    if debug_anchor:get_bool() and center_screen.visible then
+    local sample_x = Engine.WorldToScreen(center_world + Vector3.new(brim_radius, 0.0, 0.0))
+    local sample_y = Engine.WorldToScreen(center_world + Vector3.new(0.0, brim_radius, 0.0))
+    if not sample_x.visible and not sample_y.visible then return end
+
+    local brim_rx = 0.0
+    local brim_ry = 0.0
+
+    if sample_x.visible then
+        brim_rx = math.max(brim_rx, math.abs(sample_x.x - center_screen.x))
+        brim_ry = math.max(brim_ry, math.abs(sample_x.y - center_screen.y))
+    end
+
+    if sample_y.visible then
+        brim_rx = math.max(brim_rx, math.abs(sample_y.x - center_screen.x))
+        brim_ry = math.max(brim_ry, math.abs(sample_y.y - center_screen.y))
+    end
+
+    brim_rx = math.max(brim_rx, 4.0)
+    brim_ry = math.max(brim_ry, brim_rx * 0.28)
+
+    if debug_anchor:get_bool() then
         render.circle(center_screen.x, center_screen.y, 4.0, 1.0, 1.0, 1.0, 0.85, 18, 1.0)
         render.line(center_screen.x, center_screen.y, apex_screen.x, apex_screen.y, 1.0, 1.0, 1.0, 0.55, 1.0)
     end
@@ -135,31 +160,26 @@ callbacks.on_render(function()
 
     for i = 0, detail - 1 do
         local a = (i / detail) * TAU
-        local point = center + Vector3.new(
-            math.cos(a) * brim_radius,
-            math.sin(a) * brim_radius,
-            0.0
-        )
-
-        rim_screen[i + 1] = Engine.WorldToScreen(point)
+        rim_screen[i + 1] = {
+            x = center_screen.x + math.cos(a) * brim_rx,
+            y = center_screen.y + math.sin(a) * brim_ry,
+            visible = true,
+        }
     end
 
     for i = 1, detail do
         local j = (i % detail) + 1
         local p1 = rim_screen[i]
         local p2 = rim_screen[j]
+        local slice_angle = ((i - 1) / detail) * TAU
+        local t = 0.5 + 0.5 * math.sin(slice_angle + gradient_phase)
+        local r, g, b, a = mix_color(c1, c2, t, fill_alpha)
 
-        if p1.visible and p2.visible then
-            local slice_angle = ((i - 1) / detail) * TAU
-            local t = 0.5 + 0.5 * math.sin(slice_angle + gradient_phase)
-            local r, g, b, a = mix_color(c1, c2, t, fill_alpha)
-
-            render.filled_polygon({
-                { apex_screen.x, apex_screen.y },
-                { p1.x, p1.y },
-                { p2.x, p2.y }
-            }, r, g, b, a)
-        end
+        render.filled_polygon({
+            { apex_screen.x, apex_screen.y },
+            { p1.x, p1.y },
+            { p2.x, p2.y }
+        }, r, g, b, a)
     end
 
     if draw_outline:get_bool() then
@@ -174,13 +194,8 @@ callbacks.on_render(function()
             local t = 0.5 + 0.5 * math.sin(slice_angle + gradient_phase)
             local r, g, b, a = mix_color(c1, c2, t, oa)
 
-            if p1.visible and p2.visible then
-                render.line(p1.x, p1.y, p2.x, p2.y, r, g, b, a, th)
-            end
-
-            if p1.visible then
-                render.line(apex_screen.x, apex_screen.y, p1.x, p1.y, r, g, b, a, th)
-            end
+            render.line(p1.x, p1.y, p2.x, p2.y, r, g, b, a, th)
+            render.line(apex_screen.x, apex_screen.y, p1.x, p1.y, r, g, b, a, th)
         end
     end
 end)
