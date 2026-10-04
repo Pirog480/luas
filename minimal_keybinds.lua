@@ -3,7 +3,7 @@
 -- Minimalistic animated keybind overlay.
 -- Highlights use actual game actions from CUserCmd, so it reacts to your real binds.
 -- Labels are loaded from bind files when possible, and can also self-learn from pressed keys.
--- Overlay position is changed by drag-and-drop while the cheat menu is open.
+-- Overlay position is controlled with X/Y sliders.
 
 local m = ui.script()
 m:category("Visuals")
@@ -12,12 +12,16 @@ local enabled = m:switch("Minimal Keybinds", true)
 
 m:separator()
 m:group("Layout")
+local pos_x         = m:slider_int("Position X", 0, 3840, 40)
+local pos_y         = m:slider_int("Position Y", 0, 2160, 420)
 local scale         = m:slider_float("Scale", 0.70, 1.80, 1.00)
 local gap_mul       = m:slider_float("Spacing", 0.60, 1.60, 1.00)
 local animate_speed = m:slider_float("Animation speed", 4.0, 20.0, 10.0)
 
 m:separator()
 m:group("Style")
+local theme_mode    = m:combo("Theme", {"Dark", "Light"}, 0)
+local accent_color  = m:color("Accent color", {0.22, 0.68, 1.0, 1.0})
 local box_alpha     = m:slider_float("Box alpha", 0.08, 1.00, 0.72)
 local accent_alpha  = m:slider_float("Accent alpha", 0.05, 1.00, 0.25)
 local outline_alpha = m:slider_float("Outline alpha", 0.02, 0.50, 0.09)
@@ -176,11 +180,6 @@ end
 
 local panel_x = 40
 local panel_y = 420
-local menu_open = false
-local dragging = false
-local drag_dx = 0
-local drag_dy = 0
-local mouse_was_down = false
 
 local recent_keys = {}
 local action_down = {}
@@ -353,8 +352,6 @@ local function save_state()
     fs.mkdir("_agent")
 
     local payload = {
-        x = panel_x,
-        y = panel_y,
         learned = learned_vks,
     }
 
@@ -367,9 +364,6 @@ local function load_state()
 
     local data = safe_json_decode(fs.read(STATE_PATH))
     if type(data) ~= "table" then return end
-
-    if type(data.x) == "number" then panel_x = math.floor(data.x) end
-    if type(data.y) == "number" then panel_y = math.floor(data.y) end
     if type(data.learned) == "table" then learned_vks = data.learned end
 end
 
@@ -706,28 +700,60 @@ local function get_dt()
     return dt
 end
 
+local function get_theme_colors()
+    local accent = accent_color:get_color()
+    local theme = theme_mode:get_int()
+
+    if theme == 1 then
+        return {
+            bg = {0.96, 0.96, 0.96, box_alpha:get_float()},
+            shadow = {0.00, 0.00, 0.00, 0.05},
+            outline = {0.00, 0.00, 0.00, outline_alpha:get_float() + 0.03},
+            text = {0.08, 0.08, 0.08, 0.96},
+            label = {0.35, 0.35, 0.35, 0.62},
+            accent = {accent[1], accent[2], accent[3], accent_alpha:get_float()},
+            accent_line = {accent[1], accent[2], accent[3], 0.45},
+        }
+    end
+
+    return {
+        bg = {0.055, 0.060, 0.075, box_alpha:get_float()},
+        shadow = {0.00, 0.00, 0.00, 0.11},
+        outline = {1.00, 1.00, 1.00, outline_alpha:get_float()},
+        text = {0.96, 0.96, 0.96, 0.96},
+        label = {1.00, 1.00, 1.00, 0.28},
+        accent = {accent[1], accent[2], accent[3], accent_alpha:get_float()},
+        accent_line = {accent[1], accent[2], accent[3], 0.55},
+    }
+end
+
 local function draw_key_box(action_id, x, y, w, h, title, binding, is_down, dt, sc)
     action_anim[action_id] = ease(action_anim[action_id] or 0.0, is_down and 1.0 or 0.0, animate_speed:get_float(), dt)
 
     local anim = action_anim[action_id] or 0.0
-    local yy = y - anim * (2.0 * sc)
-    local rounding = 7.0 * sc
+    local yy = y - anim * (1.5 * sc)
+    local rounding = 6.0 * sc
+    local theme = get_theme_colors()
 
-    render.filled_rect(x, yy + 2.0 * sc, w, h, 0.0, 0.0, 0.0, 0.10 + anim * 0.06, rounding)
-    render.filled_rect(x, yy, w, h, 0.055, 0.060, 0.075, box_alpha:get_float(), rounding)
-    render.filled_rect(x, yy, w, h, 0.15, 0.58, 1.00, anim * accent_alpha:get_float(), rounding)
-    render.rect(x, yy, w, h, 1.0, 1.0, 1.0, outline_alpha:get_float() + anim * 0.08, 1.0, rounding)
-    render.filled_rect(x, yy + h - (2.0 * sc + anim * 2.0 * sc), w, 2.0 * sc + anim * 2.0 * sc,
-        0.22, 0.68, 1.00, 0.10 + anim * 0.25, rounding)
+    render.filled_rect(x, yy + 1.0 * sc, w, h, theme.shadow[1], theme.shadow[2], theme.shadow[3], theme.shadow[4] + anim * 0.03, rounding)
+    render.filled_rect(x, yy, w, h, theme.bg[1], theme.bg[2], theme.bg[3], theme.bg[4], rounding)
+    render.filled_rect(x, yy, w, h, theme.accent[1], theme.accent[2], theme.accent[3], anim * theme.accent[4], rounding)
+    render.rect(x, yy, w, h, theme.outline[1], theme.outline[2], theme.outline[3], theme.outline[4] + anim * 0.06, 1.0, rounding)
 
-    render.text(x + 6.0 * sc, yy + 4.0 * sc, 1.0, 1.0, 1.0, 0.28 + anim * 0.18, title, 10.0 * sc)
+    render.line(x + 6.0 * sc, yy + h - 3.0 * sc, x + w - 6.0 * sc, yy + h - 3.0 * sc,
+        theme.accent_line[1], theme.accent_line[2], theme.accent_line[3], 0.10 + anim * theme.accent_line[4], 1.2 * sc)
+
+    render.text(x + 6.0 * sc, yy + 4.0 * sc,
+        theme.label[1], theme.label[2], theme.label[3], theme.label[4] + anim * 0.10,
+        title, 10.0 * sc)
+
     draw_centered_text(
-        x, yy + 3.0 * sc, w, h - 3.0 * sc,
+        x, yy + 2.0 * sc, w, h - 2.0 * sc,
         binding.label or "?", 14.0 * sc,
-        lerp(0.76, 1.00, anim),
-        lerp(0.78, 1.00, anim),
-        lerp(0.82, 1.00, anim),
-        lerp(0.82, 1.00, anim)
+        lerp(theme.text[1] * 0.92, theme.text[1], anim),
+        lerp(theme.text[2] * 0.92, theme.text[2], anim),
+        lerp(theme.text[3] * 0.92, theme.text[3], anim),
+        lerp(0.82, theme.text[4], anim)
     )
 end
 
@@ -750,52 +776,16 @@ local function is_action_active(cmd, action_id)
     return cmd:HasButtonState(action.button)
 end
 
-local function update_drag(panel_w, panel_h, screen)
-    local cursor = input.get_cursor_position()
-    local mouse_down = input.is_button_down(0x01)
-
+local function apply_slider_position(screen, panel_w, panel_h)
     if want_reset_pos then
-        panel_x = math.floor(screen.w * 0.04)
-        panel_y = math.floor(screen.h * 0.42)
+        pos_x:set_int(math.floor(screen.w * 0.04))
+        pos_y:set_int(math.floor(screen.h * 0.42))
         want_reset_pos = false
-        dragging = false
-        save_state()
     end
 
-    if not menu_open then
-        dragging = false
-        mouse_was_down = mouse_down
-        return
-    end
-
-    local inside = cursor.x >= panel_x and cursor.x <= (panel_x + panel_w)
-        and cursor.y >= panel_y and cursor.y <= (panel_y + panel_h)
-
-    if mouse_down and not mouse_was_down and inside then
-        dragging = true
-        drag_dx = cursor.x - panel_x
-        drag_dy = cursor.y - panel_y
-    elseif not mouse_down and mouse_was_down then
-        if dragging then save_state() end
-        dragging = false
-    end
-
-    if dragging and mouse_down then
-        panel_x = clamp(math.floor(cursor.x - drag_dx), 0, math.max(0, math.floor(screen.w - panel_w)))
-        panel_y = clamp(math.floor(cursor.y - drag_dy), 0, math.max(0, math.floor(screen.h - panel_h)))
-    end
-
-    mouse_was_down = mouse_down
+    panel_x = clamp(pos_x:get_int(), 0, math.max(0, math.floor(screen.w - panel_w)))
+    panel_y = clamp(pos_y:get_int(), 0, math.max(0, math.floor(screen.h - panel_h)))
 end
-
-callbacks.on_menu_open(function()
-    menu_open = true
-end)
-
-callbacks.on_menu_close(function()
-    menu_open = false
-    dragging = false
-end)
 
 callbacks.on_key_pressed(function(vk)
     recent_keys[#recent_keys + 1] = { vk = vk, time = Engine.GetCurTime() }
@@ -898,12 +888,10 @@ callbacks.on_render(function()
     end
 
     local screen = Engine.GetScreenSize()
-    update_drag(panel_w, panel_h, screen)
+    apply_slider_position(screen, panel_w, panel_h)
 
-    panel_x = clamp(panel_x, 0, math.max(0, math.floor(screen.w - panel_w)))
-    panel_y = clamp(panel_y, 0, math.max(0, math.floor(screen.h - panel_h)))
-
-    render.text(panel_x + pad, panel_y + pad - 1.0 * sc, 1.0, 1.0, 1.0, 0.34, "keybinds", 12.0 * sc)
+    local theme = get_theme_colors()
+    render.text(panel_x + pad, panel_y + pad - 1.0 * sc, theme.label[1], theme.label[2], theme.label[3], 0.34, "keybinds", 12.0 * sc)
 
     local cy = panel_y + pad + title_h
     local ability_x = panel_x + pad + (inner_w - ability_total) * 0.5
@@ -930,7 +918,7 @@ callbacks.on_render(function()
         cy = cy + mouse_h + gap
         local status_text = panel_status
         if panel_path ~= "" then status_text = status_text .. "  •  " .. panel_path end
-        render.text(panel_x + pad, cy, 1.0, 1.0, 1.0, 0.22, status_text, 10.0 * sc)
+        render.text(panel_x + pad, cy, theme.label[1], theme.label[2], theme.label[3], 0.22, status_text, 10.0 * sc)
     end
 end)
 
