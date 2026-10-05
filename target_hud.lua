@@ -39,6 +39,8 @@ local current_total_damage = 0
 local target_until = 0.0
 local hud_alpha = 0.0
 local recent_combat_until = 0.0
+local recent_attack_candidates = {}
+local recent_attack_candidates_until = 0.0
 local last_frame_time = 0.0
 local scan_count = 0
 
@@ -66,6 +68,40 @@ local function get_dt()
     local dt = clamp(now - last_frame_time, 0.0, 0.10)
     last_frame_time = now
     return dt
+end
+
+local function normalize_yaw(y)
+    while y > 180.0 do y = y - 360.0 end
+    while y < -180.0 do y = y + 360.0 end
+    return y
+end
+
+local function normalize_pitch(p)
+    if p > 89.0 then return 89.0 end
+    if p < -89.0 then return -89.0 end
+    return p
+end
+
+local function angle_delta(current, target)
+    local dx = normalize_pitch(target.x - current.x)
+    local dy = normalize_yaw(target.y - current.y)
+    return dx, dy
+end
+
+local function angle_len(dx, dy)
+    return math.sqrt(dx * dx + dy * dy)
+end
+
+local function calc_angle(from, to)
+    local delta = to - from
+    local horiz = math.sqrt(delta.x * delta.x + delta.y * delta.y)
+    local yaw = math.atan2(delta.y, delta.x) * 180.0 / math.pi
+    local pitch = -math.atan2(delta.z, horiz) * 180.0 / math.pi
+    return QAngle.new(normalize_pitch(pitch), normalize_yaw(yaw), 0.0)
+end
+
+local function angle_is_zero(a)
+    return a and a.x == 0.0 and a.y == 0.0 and a.z == 0.0
 end
 
 local function color_lerp(c1, c2, t)
@@ -285,6 +321,65 @@ local function metric_to_screen_center(handle)
     return math.sqrt(dx * dx + dy * dy)
 end
 
+local LOCAL_HIT_FOV = 18.0
+local LOCAL_HIT_MAX_CANDIDATES = 3
+
+local function get_cmd_camera_angles(cmd)
+    local ang = cmd:GetCameraAngles()
+    if ang and not angle_is_zero(ang) then
+        return ang
+    end
+
+    ang = cmd:GetViewAngles()
+    if ang and not angle_is_zero(ang) then
+        return ang
+    end
+
+    return Engine.GetCameraAngles()
+end
+
+local function remember_attack_candidates(local_handle, local_team, view_angles)
+    local players = Engine.GetPlayers() or {}
+    local eye = get_eye_pos(local_handle)
+    local ranked = {}
+
+    recent_attack_candidates = {}
+    recent_attack_candidates_until = Engine.GetCurTime() + damage_window:get_float()
+
+    for _, handle in ipairs(players) do
+        if is_valid_enemy(local_handle, local_team, handle) then
+            local pos = get_focus_pos(handle)
+            local ang = calc_angle(eye, pos)
+            local dx, dy = angle_delta(view_angles, ang)
+            local fov = angle_len(dx, dy)
+
+            if fov <= LOCAL_HIT_FOV and is_visible(local_handle, eye, handle) then
+                local metric = fov * 100.0 + metric_to_screen_center(handle) * 0.01
+                if handle == current_target and sticky_target:get_bool() then
+                    metric = metric - 1000.0
+                end
+                ranked[#ranked + 1] = { handle = handle, metric = metric }
+            end
+        end
+    end
+
+    table.sort(ranked, function(a, b)
+        return a.metric < b.metric
+    end)
+
+    for i = 1, math.min(#ranked, LOCAL_HIT_MAX_CANDIDATES) do
+        recent_attack_candidates[ranked[i].handle] = ranked[i].metric
+    end
+
+    if current_target ~= -1 and is_valid_enemy(local_handle, local_team, current_target) then
+        recent_attack_candidates[current_target] = recent_attack_candidates[current_target] or -1.0
+    end
+end
+
+local function is_recent_attack_candidate(handle, now)
+    return now <= recent_attack_candidates_until and recent_attack_candidates[handle] ~= nil
+end
+
 local function set_target(handle, damage)
     local now = Engine.GetCurTime()
     local dmg = damage or 0
@@ -320,9 +415,9 @@ local function track_damage_events(local_handle, local_team)
 
             if prev and hp < prev then
                 local dmg = prev - hp
-                if dmg >= min_damage:get_int() and now <= recent_combat_until then
+                if dmg >= min_damage:get_int() and now <= recent_combat_until and is_recent_attack_candidate(handle, now) then
                     if (not visible_only:get_bool()) or is_visible(local_handle, eye, handle) then
-                        local metric = metric_to_screen_center(handle)
+                        local metric = recent_attack_candidates[handle] or metric_to_screen_center(handle)
                         if handle == current_target and sticky_target:get_bool() then
                             metric = metric - 5000.0
                         end
@@ -444,12 +539,16 @@ callbacks.on_local_spawn(function()
     current_target = -1
     current_total_damage = 0
     target_until = 0.0
+    recent_attack_candidates = {}
+    recent_attack_candidates_until = 0.0
 end)
 
 callbacks.on_local_death(function()
     current_target = -1
     current_total_damage = 0
     target_until = 0.0
+    recent_attack_candidates = {}
+    recent_attack_candidates_until = 0.0
 end)
 
 callbacks.on_pre_createmove(function(cmd)
@@ -462,7 +561,12 @@ callbacks.on_pre_createmove(function(cmd)
         or cmd:HasButtonState(InputBitMask_t.IN_ABILITY3)
         or cmd:HasButtonState(InputBitMask_t.IN_ABILITY4)
         or cmd:HasButtonState(InputBitMask_t.IN_WEAPON1) then
-        recent_combat_until = Engine.GetCurTime() + damage_window:get_float()
+        local local_handle = Engine.GetLocalPlayerHandle()
+        if local_handle and local_handle >= 0 and Engine.IsEntityAlive(local_handle) then
+            local local_team = Engine.GetEntityTeam(local_handle)
+            recent_combat_until = Engine.GetCurTime() + damage_window:get_float()
+            remember_attack_candidates(local_handle, local_team, get_cmd_camera_angles(cmd))
+        end
     end
 end)
 
