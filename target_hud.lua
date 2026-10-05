@@ -7,7 +7,7 @@ local m = ui.script()
 m:category("Visuals")
 
 local enabled         = m:switch("Target HUD", true)
-local style           = m:combo("Style", {"Compact", "Ring", "Flat"}, 0)
+local style           = m:combo("Style", {"Compact", "Ring"}, 0)
 local pos_x           = m:slider_int("Position X", 0, 3840, 80)
 local pos_y           = m:slider_int("Position Y", 0, 2160, 120)
 local scale           = m:slider_float("Scale", 0.70, 2.00, 1.00)
@@ -23,22 +23,19 @@ local sticky_target   = m:switch("Refresh while hitting same target", true)
 
 m:separator()
 m:group("Colors")
+local theme_mode      = m:combo("Theme", {"Dark", "Light"}, 0)
 local accent_color    = m:color("Accent", {0.20, 0.95, 0.45, 1.0})
-local bg_color        = m:color("Background", {0.07, 0.12, 0.08, 0.92})
-local text_color      = m:color("Text", {1.0, 1.0, 1.0, 1.0})
-local sub_color       = m:color("Sub text", {0.80, 0.92, 0.80, 1.0})
 local hp_low_color    = m:color("Low HP", {1.00, 0.34, 0.34, 1.0})
 
 m:separator()
 m:group("Extras")
 local draw_avatar     = m:switch("Draw hero icon", true)
 local draw_healthbar  = m:switch("Draw HP bar", true)
-local show_last_dmg   = m:switch("Show last damage", true)
 local debug_text      = m:switch("Debug text", false)
 
 local tracked_hp = {}
 local current_target = -1
-local current_damage = 0
+local current_total_damage = 0
 local target_until = 0.0
 local hud_alpha = 0.0
 local recent_combat_until = 0.0
@@ -86,6 +83,34 @@ local function health_color(frac)
     return color_lerp(lo, hi, clamp(frac, 0.0, 1.0))
 end
 
+local function theme_colors()
+    if theme_mode:get_int() == 1 then
+        return {
+            bg = {0.94, 0.95, 0.96, 0.94},
+            card = {1.00, 1.00, 1.00, 0.98},
+            text = {0.10, 0.11, 0.12, 1.00},
+            sub = {0.42, 0.45, 0.48, 1.00},
+            line = {0.00, 0.00, 0.00, 0.08},
+            shadow = {0.00, 0.00, 0.00, 0.06},
+            avatar = {0.88, 0.89, 0.91, 1.00},
+            ring_bg = {0.80, 0.82, 0.85, 0.85},
+            bar_bg = {0.84, 0.86, 0.89, 0.95},
+        }
+    end
+
+    return {
+        bg = {0.07, 0.10, 0.08, 0.92},
+        card = {0.09, 0.12, 0.10, 0.96},
+        text = {1.00, 1.00, 1.00, 1.00},
+        sub = {0.78, 0.86, 0.80, 1.00},
+        line = {1.00, 1.00, 1.00, 0.05},
+        shadow = {0.00, 0.00, 0.00, 0.10},
+        avatar = {0.12, 0.12, 0.12, 1.00},
+        ring_bg = {0.18, 0.18, 0.18, 0.70},
+        bar_bg = {0.10, 0.16, 0.11, 0.90},
+    }
+end
+
 local function lower(s)
     return (s or ""):lower()
 end
@@ -102,14 +127,73 @@ local function prettify_hero_name(raw)
     return out
 end
 
+local HERO_ICON_ALIASES = {
+    bull = "abrams",
+    punkgoat = "billy",
+    nano = "calico",
+    celestial = "celeste",
+    sumo = "dynamo",
+    spectre = "lady_geist",
+    archer = "grey_talon",
+    astro = "holliday",
+    inferno = "infernus",
+    tengu = "ivy",
+    digger = "mo_and_krill",
+    bookworm = "paige",
+    chrono = "paradox",
+    synth = "pocket",
+    familiar = "rem",
+    gigawatt = "seven",
+    magician = "sinclair",
+    priest = "venator",
+    hornet = "vindicta",
+    frank = "victor",
+    viper = "vyper",
+    fencer = "apollo",
+    werewolf = "silver",
+}
+
 local function hero_slug(raw)
-    return lower((raw or ""):match("hero_([a-z0-9_]+)") or "")
+    local slug = lower((raw or ""):match("hero_([a-z0-9_]+)") or "")
+    if slug == "" then
+        slug = lower(raw or "")
+    end
+    return slug
 end
 
-local function hero_icon_path(handle)
-    local slug = hero_slug(Engine.GetEntityName(handle))
-    if slug == "" then return nil end
-    return "panorama/images/heroes/" .. slug .. "_sm_psd.vtex_c"
+local function hero_icon_candidates(handle)
+    local raw_slug = hero_slug(Engine.GetEntityName(handle))
+    if raw_slug == "" then return {} end
+
+    local normalized = HERO_ICON_ALIASES[raw_slug] or raw_slug
+    local slugs = { normalized }
+    if raw_slug ~= normalized then
+        slugs[#slugs + 1] = raw_slug
+    end
+
+    local out = {}
+    for i = 1, #slugs do
+        local slug = slugs[i]
+        out[#out + 1] = "panorama/images/heroes/" .. slug .. "_sm_psd.vtex_c"
+        out[#out + 1] = "panorama/images/heroes/" .. slug .. "_card_psd.vtex_c"
+        out[#out + 1] = "panorama/images/heroes/" .. slug .. "_psd.vtex_c"
+        out[#out + 1] = "panorama/images/heroes/" .. slug .. "_mm_psd.vtex_c"
+        out[#out + 1] = "panorama/images/heroes_circle/" .. slug .. "_png.vtex_c"
+        out[#out + 1] = "panorama/images/heroes_circle/" .. slug .. ".vtex_c"
+    end
+    return out
+end
+
+local function draw_hero_icon(handle, x, y, w, h, alpha_mul, theme)
+    render.filled_rect(x, y, w, h, theme.avatar[1], theme.avatar[2], theme.avatar[3], 0.95 * alpha_mul, 8.0)
+
+    local candidates = hero_icon_candidates(handle)
+    for i = 1, #candidates do
+        render.panorama_image(candidates[i], x, y, w, h, 1.0, 1.0, 1.0, alpha_mul)
+    end
+
+    local short = prettify_hero_name(Engine.GetEntityName(handle)):sub(1, 1)
+    render.text(x + w * 0.36, y + h * 0.18, theme.text[1], theme.text[2], theme.text[3], 0.26 * alpha_mul, short, h * 0.52)
 end
 
 local function get_eye_pos(handle)
@@ -167,9 +251,17 @@ local function metric_to_screen_center(handle)
 end
 
 local function set_target(handle, damage)
-    current_target = handle
-    current_damage = damage or 0
-    target_until = Engine.GetCurTime() + show_time:get_float()
+    local now = Engine.GetCurTime()
+    local dmg = damage or 0
+
+    if handle ~= current_target or now > target_until then
+        current_target = handle
+        current_total_damage = dmg
+    else
+        current_total_damage = current_total_damage + dmg
+    end
+
+    target_until = now + show_time:get_float()
 end
 
 local function track_damage_events(local_handle, local_team)
@@ -248,47 +340,34 @@ local function draw_compact_style(handle, alpha_mul)
     local h = 76.0 * sc
     local avatar = 48.0 * sc
 
-    local bg = bg_color:get_color()
-    local txt = text_color:get_color()
-    local sub = sub_color:get_color()
+    local theme = theme_colors()
     local hp = Engine.GetEntityHealth(handle)
     local max_hp = math.max(1, Engine.GetEntityMaxHealth(handle))
     local frac = clamp(hp / max_hp, 0.0, 1.0)
     local hp_col = health_color(frac)
-    local dist = (get_focus_pos(handle) - Engine.GetEntityOrigin(Engine.GetLocalPlayerHandle())):Length()
-    local speed = get_velocity(handle):Length2D()
 
-    render.filled_rect(x + 3 * sc, y + 4 * sc, w, h, 0.0, 0.0, 0.0, 0.10 * alpha_mul, 12.0 * sc)
-    render.filled_rect(x, y, w, h, bg[1], bg[2], bg[3], bg[4] * alpha_mul, 12.0 * sc)
-    render.rect(x, y, w, h, 1.0, 1.0, 1.0, 0.05 * alpha_mul, 1.0, 12.0 * sc)
+    render.filled_rect(x + 3 * sc, y + 4 * sc, w, h, theme.shadow[1], theme.shadow[2], theme.shadow[3], theme.shadow[4] * alpha_mul, 12.0 * sc)
+    render.filled_rect(x, y, w, h, theme.card[1], theme.card[2], theme.card[3], theme.card[4] * alpha_mul, 12.0 * sc)
+    render.rect(x, y, w, h, theme.line[1], theme.line[2], theme.line[3], theme.line[4] * alpha_mul, 1.0, 12.0 * sc)
+
+    local accent = accent_color:get_color()
+    render.filled_rect(x + 4 * sc, y + 10 * sc, 3 * sc, h - 20 * sc, accent[1], accent[2], accent[3], 0.90 * alpha_mul, 3.0 * sc)
 
     if draw_avatar:get_bool() then
-        render.filled_rect(x + 10 * sc, y + 14 * sc, avatar, avatar, 0.12, 0.12, 0.12, 0.95 * alpha_mul, 8.0 * sc)
-        local icon = hero_icon_path(handle)
-        if icon then
-            render.panorama_image(icon, x + 10 * sc, y + 14 * sc, avatar, avatar, 1.0, 1.0, 1.0, alpha_mul)
-        end
+        draw_hero_icon(handle, x + 12 * sc, y + 14 * sc, avatar, avatar, alpha_mul, theme)
     end
 
-    local text_x = x + 68 * sc
-    render.text(text_x, y + 10 * sc, txt[1], txt[2], txt[3], 0.96 * alpha_mul, prettify_hero_name(Engine.GetEntityName(handle)), 16 * sc)
-    render.text(x + w - 58 * sc, y + 10 * sc, hp_col[1], hp_col[2], hp_col[3], 0.98 * alpha_mul, tostring(hp) .. " HP", 15 * sc)
-
-    render.text(text_x, y + 33 * sc, sub[1], sub[2], sub[3], 0.80 * alpha_mul,
-        string.format("Dist %.0f  |  Speed %.0f", dist, speed), 12 * sc)
-
-    if show_last_dmg:get_bool() and current_damage > 0 then
-        render.text(text_x, y + 48 * sc, hp_col[1], hp_col[2], hp_col[3], 0.88 * alpha_mul,
-            string.format("Last hit -%d", current_damage), 12 * sc)
-    else
-        render.text(text_x, y + 48 * sc, sub[1], sub[2], sub[3], 0.78 * alpha_mul,
-            string.format("%d / %d", hp, max_hp), 12 * sc)
-    end
+    local text_x = x + 70 * sc
+    render.text(text_x, y + 10 * sc, theme.text[1], theme.text[2], theme.text[3], 0.96 * alpha_mul, prettify_hero_name(Engine.GetEntityName(handle)), 16 * sc)
+    render.text(text_x, y + 33 * sc, theme.sub[1], theme.sub[2], theme.sub[3], 0.88 * alpha_mul,
+        string.format("HP %d/%d", hp, max_hp), 12 * sc)
+    render.text(text_x, y + 48 * sc, hp_col[1], hp_col[2], hp_col[3], 0.92 * alpha_mul,
+        string.format("Damage %d", current_total_damage), 12 * sc)
 
     if draw_healthbar:get_bool() then
-        draw_bar(x + 66 * sc, y + 60 * sc, w - 78 * sc, 8 * sc,
+        draw_bar(x + 68 * sc, y + 60 * sc, w - 80 * sc, 8 * sc,
             frac,
-            {0.10, 0.16, 0.11, 0.90 * alpha_mul},
+            {theme.bar_bg[1], theme.bar_bg[2], theme.bar_bg[3], theme.bar_bg[4] * alpha_mul},
             {hp_col[1], hp_col[2], hp_col[3], 0.96 * alpha_mul}
         )
     end
@@ -304,95 +383,41 @@ local function draw_ring_style(handle, alpha_mul)
     local cx = x + 36.0 * sc
     local cy = y + 42.0 * sc
 
-    local bg = bg_color:get_color()
-    local txt = text_color:get_color()
-    local sub = sub_color:get_color()
+    local theme = theme_colors()
     local hp = Engine.GetEntityHealth(handle)
     local max_hp = math.max(1, Engine.GetEntityMaxHealth(handle))
     local frac = clamp(hp / max_hp, 0.0, 1.0)
     local hp_col = health_color(frac)
-    local dist = (get_focus_pos(handle) - Engine.GetEntityOrigin(Engine.GetLocalPlayerHandle())):Length()
-    local speed = get_velocity(handle):Length2D()
 
-    render.filled_rect(x + 3 * sc, y + 4 * sc, w, h, 0.0, 0.0, 0.0, 0.10 * alpha_mul, 12.0 * sc)
-    render.filled_rect(x, y, w, h, bg[1], bg[2], bg[3], bg[4] * alpha_mul, 12.0 * sc)
-    render.rect(x, y, w, h, 1.0, 1.0, 1.0, 0.05 * alpha_mul, 1.0, 12.0 * sc)
+    render.filled_rect(x + 3 * sc, y + 4 * sc, w, h, theme.shadow[1], theme.shadow[2], theme.shadow[3], theme.shadow[4] * alpha_mul, 12.0 * sc)
+    render.filled_rect(x, y, w, h, theme.card[1], theme.card[2], theme.card[3], theme.card[4] * alpha_mul, 12.0 * sc)
+    render.rect(x, y, w, h, theme.line[1], theme.line[2], theme.line[3], theme.line[4] * alpha_mul, 1.0, 12.0 * sc)
 
-    render.circle(cx, cy, ring_r, 0.18, 0.18, 0.18, 0.70 * alpha_mul, 48, 5.0 * sc)
+    render.circle(cx, cy, ring_r, theme.ring_bg[1], theme.ring_bg[2], theme.ring_bg[3], theme.ring_bg[4] * alpha_mul, 48, 5.0 * sc)
     draw_arc(cx, cy, ring_r, -math.pi * 0.5, -math.pi * 0.5 + math.pi * 2.0 * frac, hp_col, 0.95 * alpha_mul, 5.0 * sc, 48)
 
     if draw_avatar:get_bool() then
-        render.filled_rect(cx - 16 * sc, cy - 16 * sc, 32 * sc, 32 * sc, 0.12, 0.12, 0.12, 0.95 * alpha_mul, 6.0 * sc)
-        local icon = hero_icon_path(handle)
-        if icon then
-            render.panorama_image(icon, cx - 16 * sc, cy - 16 * sc, 32 * sc, 32 * sc, 1.0, 1.0, 1.0, alpha_mul)
-        end
+        draw_hero_icon(handle, cx - 16 * sc, cy - 16 * sc, 32 * sc, 32 * sc, alpha_mul, theme)
     end
 
     local tx = x + 72 * sc
-    render.text(tx, y + 14 * sc, txt[1], txt[2], txt[3], 0.96 * alpha_mul, prettify_hero_name(Engine.GetEntityName(handle)), 16 * sc)
+    render.text(tx, y + 14 * sc, theme.text[1], theme.text[2], theme.text[3], 0.96 * alpha_mul, prettify_hero_name(Engine.GetEntityName(handle)), 16 * sc)
     render.text(tx, y + 35 * sc, hp_col[1], hp_col[2], hp_col[3], 0.98 * alpha_mul,
-        string.format("%d / %d HP", hp, max_hp), 13 * sc)
-    render.text(tx, y + 54 * sc, sub[1], sub[2], sub[3], 0.82 * alpha_mul,
-        string.format("Dist %.0f  •  Speed %.0f", dist, speed), 12 * sc)
-
-    if show_last_dmg:get_bool() and current_damage > 0 then
-        render.text(x + w - 66 * sc, y + 14 * sc, hp_col[1], hp_col[2], hp_col[3], 0.92 * alpha_mul,
-            string.format("-%d", current_damage), 18 * sc)
-    end
-end
-
-local function draw_flat_style(handle, alpha_mul)
-    local sc = scale:get_float()
-    local x = pos_x:get_int()
-    local y = pos_y:get_int()
-    local w = 240.0 * sc
-    local h = 58.0 * sc
-
-    local bg = bg_color:get_color()
-    local txt = text_color:get_color()
-    local sub = sub_color:get_color()
-    local hp = Engine.GetEntityHealth(handle)
-    local max_hp = math.max(1, Engine.GetEntityMaxHealth(handle))
-    local frac = clamp(hp / max_hp, 0.0, 1.0)
-    local hp_col = health_color(frac)
-    local dist = (get_focus_pos(handle) - Engine.GetEntityOrigin(Engine.GetLocalPlayerHandle())):Length()
-
-    render.filled_rect(x, y, w, h, bg[1], bg[2], bg[3], bg[4] * alpha_mul, 8.0 * sc)
-    render.filled_rect(x, y, 4 * sc, h, hp_col[1], hp_col[2], hp_col[3], 0.95 * alpha_mul, 8.0 * sc)
-    render.rect(x, y, w, h, 1.0, 1.0, 1.0, 0.05 * alpha_mul, 1.0, 8.0 * sc)
-
-    if draw_avatar:get_bool() then
-        render.filled_rect(x + 10 * sc, y + 10 * sc, 38 * sc, 38 * sc, 0.12, 0.12, 0.12, 0.95 * alpha_mul, 6.0 * sc)
-        local icon = hero_icon_path(handle)
-        if icon then
-            render.panorama_image(icon, x + 10 * sc, y + 10 * sc, 38 * sc, 38 * sc, 1.0, 1.0, 1.0, alpha_mul)
-        end
-    end
-
-    render.text(x + 58 * sc, y + 10 * sc, txt[1], txt[2], txt[3], 0.96 * alpha_mul, prettify_hero_name(Engine.GetEntityName(handle)), 15 * sc)
-    render.text(x + 58 * sc, y + 30 * sc, sub[1], sub[2], sub[3], 0.82 * alpha_mul,
-        string.format("HP %d/%d  |  Dist %.0f", hp, max_hp, dist), 12 * sc)
-
-    if draw_healthbar:get_bool() then
-        draw_bar(x + 148 * sc, y + 18 * sc, 80 * sc, 22 * sc,
-            frac,
-            {0.10, 0.10, 0.10, 0.65 * alpha_mul},
-            {hp_col[1], hp_col[2], hp_col[3], 0.98 * alpha_mul}
-        )
-    end
+        string.format("HP %d/%d", hp, max_hp), 13 * sc)
+    render.text(tx, y + 54 * sc, theme.sub[1], theme.sub[2], theme.sub[3], 0.86 * alpha_mul,
+        string.format("Total damage %d", current_total_damage), 12 * sc)
 end
 
 callbacks.on_local_spawn(function()
     tracked_hp = {}
     current_target = -1
-    current_damage = 0
+    current_total_damage = 0
     target_until = 0.0
 end)
 
 callbacks.on_local_death(function()
     current_target = -1
-    current_damage = 0
+    current_total_damage = 0
     target_until = 0.0
 end)
 
@@ -433,18 +458,20 @@ callbacks.on_render(function()
     end
 
     hud_alpha = ease(hud_alpha, visible and 1.0 or 0.0, fade_speed:get_float(), get_dt())
-    if hud_alpha <= 0.01 then return end
+    if not visible and hud_alpha <= 0.01 then
+        current_target = -1
+        current_total_damage = 0
+        return
+    end
 
     if style:get_int() == 0 then
         draw_compact_style(current_target, hud_alpha)
-    elseif style:get_int() == 1 then
-        draw_ring_style(current_target, hud_alpha)
     else
-        draw_flat_style(current_target, hud_alpha)
+        draw_ring_style(current_target, hud_alpha)
     end
 
     if debug_text:get_bool() then
         render.text(pos_x:get_int(), pos_y:get_int() + 100 * scale:get_float(), 1.0, 1.0, 1.0, 0.85,
-            string.format("scan=%d target=%d damage=%d", scan_count, current_target, current_damage), 13)
+            string.format("scan=%d target=%d total=%d", scan_count, current_target, current_total_damage), 13)
     end
 end)
