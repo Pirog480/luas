@@ -223,6 +223,41 @@ local function get_velocity(handle)
     return Vector3.new(0.0, 0.0, 0.0)
 end
 
+local function read_number_prop(handle, prop)
+    local ok, value = pcall(function()
+        return Engine.GetProp(handle, prop)
+    end)
+    if not ok then return nil end
+
+    if type(value) == "number" then
+        return value
+    end
+
+    return nil
+end
+
+local function get_display_health(handle)
+    local hp = math.max(0, tonumber(Engine.GetEntityHealth(handle)) or 0)
+    local max_hp = tonumber(Engine.GetEntityMaxHealth(handle)) or 0
+
+    local prop_candidates = {
+        "m_iMaxHealth",
+        "m_iHealthMax",
+        "m_flMaxHealth",
+        "m_flHealthMax",
+    }
+
+    for i = 1, #prop_candidates do
+        local prop_value = read_number_prop(handle, prop_candidates[i])
+        if prop_value and prop_value > max_hp then
+            max_hp = prop_value
+        end
+    end
+
+    max_hp = math.max(1, math.floor(max_hp + 0.5), hp)
+    return hp, max_hp, clamp(hp / max_hp, 0.0, 1.0)
+end
+
 local function is_valid_enemy(local_handle, local_team, handle)
     if not handle or handle <= 0 then return false end
     if handle == local_handle then return false end
@@ -341,9 +376,7 @@ local function draw_compact_style(handle, alpha_mul)
     local avatar = 48.0 * sc
 
     local theme = theme_colors()
-    local hp = Engine.GetEntityHealth(handle)
-    local max_hp = math.max(1, Engine.GetEntityMaxHealth(handle))
-    local frac = clamp(hp / max_hp, 0.0, 1.0)
+    local hp, max_hp, frac = get_display_health(handle)
     local hp_col = health_color(frac)
 
     render.filled_rect(x + 3 * sc, y + 4 * sc, w, h, theme.shadow[1], theme.shadow[2], theme.shadow[3], theme.shadow[4] * alpha_mul, 12.0 * sc)
@@ -384,9 +417,7 @@ local function draw_ring_style(handle, alpha_mul)
     local cy = y + 42.0 * sc
 
     local theme = theme_colors()
-    local hp = Engine.GetEntityHealth(handle)
-    local max_hp = math.max(1, Engine.GetEntityMaxHealth(handle))
-    local frac = clamp(hp / max_hp, 0.0, 1.0)
+    local hp, max_hp, frac = get_display_health(handle)
     local hp_col = health_color(frac)
 
     render.filled_rect(x + 3 * sc, y + 4 * sc, w, h, theme.shadow[1], theme.shadow[2], theme.shadow[3], theme.shadow[4] * alpha_mul, 12.0 * sc)
