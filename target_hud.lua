@@ -41,6 +41,7 @@ local hud_alpha = 0.0
 local recent_combat_until = 0.0
 local recent_attack_candidates = {}
 local recent_attack_candidates_until = 0.0
+local last_attack_angles = nil
 local last_frame_time = 0.0
 local scan_count = 0
 
@@ -321,8 +322,8 @@ local function metric_to_screen_center(handle)
     return math.sqrt(dx * dx + dy * dy)
 end
 
-local LOCAL_HIT_FOV = 18.0
-local LOCAL_HIT_MAX_CANDIDATES = 3
+local LOCAL_HIT_FOV = 32.0
+local LOCAL_HIT_MAX_CANDIDATES = 6
 
 local function get_cmd_camera_angles(cmd)
     local ang = cmd:GetCameraAngles()
@@ -345,6 +346,7 @@ local function remember_attack_candidates(local_handle, local_team, view_angles)
 
     recent_attack_candidates = {}
     recent_attack_candidates_until = Engine.GetCurTime() + damage_window:get_float()
+    last_attack_angles = view_angles
 
     for _, handle in ipairs(players) do
         if is_valid_enemy(local_handle, local_team, handle) then
@@ -352,9 +354,13 @@ local function remember_attack_candidates(local_handle, local_team, view_angles)
             local ang = calc_angle(eye, pos)
             local dx, dy = angle_delta(view_angles, ang)
             local fov = angle_len(dx, dy)
+            local screen_metric = metric_to_screen_center(handle)
 
-            if fov <= LOCAL_HIT_FOV and is_visible(local_handle, eye, handle) then
-                local metric = fov * 100.0 + metric_to_screen_center(handle) * 0.01
+            if fov <= LOCAL_HIT_FOV and screen_metric < math.huge then
+                local metric = fov * 100.0 + screen_metric * 0.02
+                if is_visible(local_handle, eye, handle) then
+                    metric = metric - 35.0
+                end
                 if handle == current_target and sticky_target:get_bool() then
                     metric = metric - 1000.0
                 end
@@ -376,8 +382,30 @@ local function remember_attack_candidates(local_handle, local_team, view_angles)
     end
 end
 
-local function is_recent_attack_candidate(handle, now)
-    return now <= recent_attack_candidates_until and recent_attack_candidates[handle] ~= nil
+local function get_recent_attack_metric(local_handle, handle, now)
+    if now > recent_combat_until then return nil end
+
+    local metric = recent_attack_candidates[handle]
+    if metric ~= nil and now <= recent_attack_candidates_until then
+        return metric
+    end
+
+    if not last_attack_angles then return nil end
+
+    local eye = get_eye_pos(local_handle)
+    local ang = calc_angle(eye, get_focus_pos(handle))
+    local dx, dy = angle_delta(last_attack_angles, ang)
+    local fov = angle_len(dx, dy)
+    local screen_metric = metric_to_screen_center(handle)
+    if fov > LOCAL_HIT_FOV * 1.5 or screen_metric == math.huge then
+        return nil
+    end
+
+    local fallback_metric = fov * 100.0 + screen_metric * 0.02 + 200.0
+    if is_visible(local_handle, eye, handle) then
+        fallback_metric = fallback_metric - 35.0
+    end
+    return fallback_metric
 end
 
 local function set_target(handle, damage)
@@ -415,9 +443,13 @@ local function track_damage_events(local_handle, local_team)
 
             if prev and hp < prev then
                 local dmg = prev - hp
-                if dmg >= min_damage:get_int() and now <= recent_combat_until and is_recent_attack_candidate(handle, now) then
+                local metric = nil
+                if dmg >= min_damage:get_int() then
+                    metric = get_recent_attack_metric(local_handle, handle, now)
+                end
+
+                if metric ~= nil then
                     if (not visible_only:get_bool()) or is_visible(local_handle, eye, handle) then
-                        local metric = recent_attack_candidates[handle] or metric_to_screen_center(handle)
                         if handle == current_target and sticky_target:get_bool() then
                             metric = metric - 5000.0
                         end
@@ -541,6 +573,7 @@ callbacks.on_local_spawn(function()
     target_until = 0.0
     recent_attack_candidates = {}
     recent_attack_candidates_until = 0.0
+    last_attack_angles = nil
 end)
 
 callbacks.on_local_death(function()
@@ -549,6 +582,7 @@ callbacks.on_local_death(function()
     target_until = 0.0
     recent_attack_candidates = {}
     recent_attack_candidates_until = 0.0
+    last_attack_angles = nil
 end)
 
 callbacks.on_pre_createmove(function(cmd)
