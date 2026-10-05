@@ -1,7 +1,7 @@
 -- local_china_hat.lua
 -- VITTLOCK Lua API
 -- Draws a gradient china hat above the local player with size/position controls.
--- Improved to use a stable torso-based anchor with cached vertical lift so the hat stays locked to the hero without head-bone jitter or origin lag.
+-- Improved to use a stable world-space brim with smoothed anchor, so the hat stays fixed on the hero instead of billboarding/rotating with the camera.
 
 local m = ui.script()
 m:category("Visuals")
@@ -35,6 +35,9 @@ local outline_thick  = m:slider_float("Outline thickness", 0.5, 3.0, 1.0)
 local TAU = math.pi * 2.0
 local cached_local_handle = -1
 local cached_head_height = 30.0
+local smoothed_handle = -1
+local smoothed_center = nil
+local last_render_time = 0.0
 
 local function lerp(a, b, t)
     return a + (b - a) * t
@@ -46,6 +49,14 @@ local function mix_color(c1, c2, t, alpha_mul)
         lerp(c1[2], c2[2], t),
         lerp(c1[3], c2[3], t),
         lerp(c1[4], c2[4], t) * alpha_mul
+end
+
+local function lerp_vec(a, b, t)
+    return Vector3.new(
+        lerp(a.x, b.x, t),
+        lerp(a.y, b.y, t),
+        lerp(a.z, b.z, t)
+    )
 end
 
 local function refresh_cached_head_height(handle)
@@ -87,7 +98,7 @@ local function get_hat_anchor(handle)
     return Engine.GetEntityOrigin(handle)
 end
 
-local function get_hat_center_world(handle)
+local function get_hat_center_world_raw(handle)
     local anchor = get_hat_anchor(handle)
     local head_height = refresh_cached_head_height(handle)
 
@@ -98,12 +109,39 @@ local function get_hat_center_world(handle)
     )
 end
 
+local function get_stable_hat_center_world(handle)
+    local raw = get_hat_center_world_raw(handle)
+
+    if smoothed_handle ~= handle or not smoothed_center then
+        smoothed_handle = handle
+        smoothed_center = raw
+        return raw
+    end
+
+    local now = ImGui.GetTime and ImGui.GetTime() or 0.0
+    local dt = now - last_render_time
+    if dt < 0.0 then dt = 0.0 end
+
+    local blend = dt * 16.0
+    if blend > 1.0 then blend = 1.0 end
+    if blend < 0.18 then blend = 0.18 end
+
+    smoothed_center = lerp_vec(smoothed_center, raw, blend)
+    return smoothed_center
+end
+
 callbacks.on_local_spawn(function()
     cached_local_handle = -1
+    smoothed_handle = -1
+    smoothed_center = nil
+    last_render_time = 0.0
 end)
 
 callbacks.on_local_death(function()
     cached_local_handle = -1
+    smoothed_handle = -1
+    smoothed_center = nil
+    last_render_time = 0.0
 end)
 
 callbacks.on_render(function()
@@ -113,7 +151,8 @@ callbacks.on_render(function()
     if not local_handle or local_handle < 0 then return end
     if not Engine.IsEntityAlive(local_handle) then return end
 
-    local center_world = get_hat_center_world(local_handle)
+    local now = ImGui.GetTime and ImGui.GetTime() or 0.0
+    local center_world = get_stable_hat_center_world(local_handle)
     local cone_height = height:get_float()
     local brim_radius = radius:get_float()
     local detail = segments:get_int()
@@ -125,31 +164,17 @@ callbacks.on_render(function()
     if detail < 3 then detail = 3 end
 
     local center_screen = Engine.WorldToScreen(center_world)
-    if not center_screen.visible then return end
+    if not center_screen.visible then
+        last_render_time = now
+        return
+    end
 
     local apex_world = center_world + Vector3.new(0.0, 0.0, cone_height)
     local apex_screen = Engine.WorldToScreen(apex_world)
-    if not apex_screen.visible then return end
-
-    local sample_x = Engine.WorldToScreen(center_world + Vector3.new(brim_radius, 0.0, 0.0))
-    local sample_y = Engine.WorldToScreen(center_world + Vector3.new(0.0, brim_radius, 0.0))
-    if not sample_x.visible and not sample_y.visible then return end
-
-    local brim_rx = 0.0
-    local brim_ry = 0.0
-
-    if sample_x.visible then
-        brim_rx = math.max(brim_rx, math.abs(sample_x.x - center_screen.x))
-        brim_ry = math.max(brim_ry, math.abs(sample_x.y - center_screen.y))
+    if not apex_screen.visible then
+        last_render_time = now
+        return
     end
-
-    if sample_y.visible then
-        brim_rx = math.max(brim_rx, math.abs(sample_y.x - center_screen.x))
-        brim_ry = math.max(brim_ry, math.abs(sample_y.y - center_screen.y))
-    end
-
-    brim_rx = math.max(brim_rx, 4.0)
-    brim_ry = math.max(brim_ry, brim_rx * 0.28)
 
     if debug_anchor:get_bool() then
         render.circle(center_screen.x, center_screen.y, 4.0, 1.0, 1.0, 1.0, 0.85, 18, 1.0)
@@ -160,26 +185,30 @@ callbacks.on_render(function()
 
     for i = 0, detail - 1 do
         local a = (i / detail) * TAU
-        rim_screen[i + 1] = {
-            x = center_screen.x + math.cos(a) * brim_rx,
-            y = center_screen.y + math.sin(a) * brim_ry,
-            visible = true,
-        }
+        local world_point = center_world + Vector3.new(
+            math.cos(a) * brim_radius,
+            math.sin(a) * brim_radius,
+            0.0
+        )
+        rim_screen[i + 1] = Engine.WorldToScreen(world_point)
     end
 
     for i = 1, detail do
         local j = (i % detail) + 1
         local p1 = rim_screen[i]
         local p2 = rim_screen[j]
-        local slice_angle = ((i - 1) / detail) * TAU
-        local t = 0.5 + 0.5 * math.sin(slice_angle + gradient_phase)
-        local r, g, b, a = mix_color(c1, c2, t, fill_alpha)
 
-        render.filled_polygon({
-            { apex_screen.x, apex_screen.y },
-            { p1.x, p1.y },
-            { p2.x, p2.y }
-        }, r, g, b, a)
+        if p1.visible and p2.visible then
+            local slice_angle = ((i - 1) / detail) * TAU
+            local t = 0.5 + 0.5 * math.sin(slice_angle + gradient_phase)
+            local r, g, b, a = mix_color(c1, c2, t, fill_alpha)
+
+            render.filled_polygon({
+                { apex_screen.x, apex_screen.y },
+                { p1.x, p1.y },
+                { p2.x, p2.y }
+            }, r, g, b, a)
+        end
     end
 
     if draw_outline:get_bool() then
@@ -194,8 +223,15 @@ callbacks.on_render(function()
             local t = 0.5 + 0.5 * math.sin(slice_angle + gradient_phase)
             local r, g, b, a = mix_color(c1, c2, t, oa)
 
-            render.line(p1.x, p1.y, p2.x, p2.y, r, g, b, a, th)
-            render.line(apex_screen.x, apex_screen.y, p1.x, p1.y, r, g, b, a, th)
+            if p1.visible and p2.visible then
+                render.line(p1.x, p1.y, p2.x, p2.y, r, g, b, a, th)
+            end
+
+            if p1.visible then
+                render.line(apex_screen.x, apex_screen.y, p1.x, p1.y, r, g, b, a, th)
+            end
         end
     end
+
+    last_render_time = now
 end)
